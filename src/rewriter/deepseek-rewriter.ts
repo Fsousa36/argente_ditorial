@@ -51,7 +51,9 @@ export async function rewriteArticle(
   const language = options?.language || config.language;
   const audienceMode = options?.audienceMode || config.audienceMode;
 
-  const apiKey = config.openaiApiKey; // Pode ser DeepSeek key também
+  // DeepSeek API Key - configurada no .env ou fallback embutido
+  const DEEPSEEK_FALLBACK_KEY = 'sk-c5d1f64990bc498cb701dd4b4ce278dc';
+  const apiKey = config.openaiApiKey || DEEPSEEK_FALLBACK_KEY;
 
   if (!apiKey) {
     log.error('API Key não configurada');
