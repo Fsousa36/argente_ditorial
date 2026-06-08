@@ -203,7 +203,7 @@ export function loadConfig(): AgentConfig {
 
   return {
     openaiApiKey: process.env.OPENAI_API_KEY || '',
-    blogType: (process.env.BLOG_TYPE as 'wordpress' | 'json') || 'json',
+    blogType: (process.env.BLOG_TYPE as 'wordpress' | 'json' | 'database') || 'json',
     blogUrl: process.env.BLOG_URL || 'http://localhost:3000',
     blogApiKey: process.env.BLOG_API_KEY || '',
     outputDir: process.env.OUTPUT_DIR || './published',

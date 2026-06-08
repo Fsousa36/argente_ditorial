@@ -4,9 +4,10 @@ import { fetchAllSources } from './sources/rss-fetcher.js';
 import { rewriteArticles } from './rewriter/deepseek-rewriter.js';
 import { addImagesToArticles } from './images/image-fetcher.js';
 import { publishArticlesToJson } from './publisher/json-publisher.js';
+import { publishArticlesToDatabase } from './publisher/database-publisher.js';
 import { Deduplicator } from './utils/deduplicator.js';
 import { createScopedLogger } from './utils/logger.js';
-import { RawArticle } from './types.js';
+import { RawArticle, ProcessedArticle, PublishedArticle } from './types.js';
 
 const log = createScopedLogger('Main');
 
@@ -60,7 +61,7 @@ async function runPipeline(): Promise<RunResult> {
       return { totalFetched, newArticles: 0, rewritten: 0, published: 0, errors: 0, duration: Date.now() - startTime };
     }
 
-    // Step 3: Rewrite articles using OpenAI
+    // Step 3: Rewrite articles using DeepSeek
     log.info('Step 3/4: Reescrevendo artigos com IA...');
     const processedArticles = await rewriteArticles(uniqueArticles);
 
@@ -71,45 +72,43 @@ async function runPipeline(): Promise<RunResult> {
 
     rewritten = processedArticles.length;
 
-    // Step 4: Add images
+    // Step 3b: Add images
+    let articlesWithImages: ProcessedArticle[];
     if (config.includeImages) {
       log.info('Step 3b/4: Adicionando imagens aos artigos...');
-      const withImages = await addImagesToArticles(processedArticles);
-
-      // Step 5: Publish
-      log.info('Step 4/4: Publicando artigos...');
-      const results = await publishArticlesToJson(withImages);
-
-      for (const result of results) {
-        if (result.status === 'published') {
-          published++;
-          // Mark as processed in deduplicator
-          deduplicator.markAsProcessed(result.originalUrl, result.title, '', true, result.publishedAt);
-          log.info(`✅ Publicado: "${result.title}" → ${result.blogUrl}`);
-        } else {
-          errors++;
-          // Still mark as processed to avoid re-processing failed articles
-          deduplicator.markAsProcessed(result.originalUrl, result.title, '', false);
-          log.error(`❌ Falha ao publicar: "${result.title}" - ${result.error}`);
-        }
-      }
+      articlesWithImages = await addImagesToArticles(processedArticles);
     } else {
-      // Publish without images
-      const results = await publishArticlesToJson(processedArticles);
-      for (const result of results) {
-        if (result.status === 'published') {
-          published++;
-          deduplicator.markAsProcessed(result.originalUrl, result.title, '', true, result.publishedAt);
-          log.info(`✅ Publicado: "${result.title}" → ${result.blogUrl}`);
-        } else {
-          errors++;
-          deduplicator.markAsProcessed(result.originalUrl, result.title, '', false);
-          log.error(`❌ Falha ao publicar: "${result.title}" - ${result.error}`);
-        }
+      articlesWithImages = processedArticles;
+    }
+
+    // Step 4: Publish — SUPPORTS MULTIPLE PUBLISHERS
+    log.info('Step 4/4: Publicando artigos...');
+    let results: PublishedArticle[] = [];
+
+    // Always publish to JSON (local files)
+    log.info('  → Publicando em JSON (arquivos locais)...');
+    results = await publishArticlesToJson(articlesWithImages);
+
+    // Also publish to database if configured
+    if (config.blogType === 'database' || process.env.DATABASE_URL) {
+      log.info('  → Publicando no PostgreSQL...');
+      const dbResults = await publishArticlesToDatabase(articlesWithImages);
+      results = [...results, ...dbResults];
+    }
+
+    for (const result of results) {
+      if (result.status === 'published') {
+        published++;
+        deduplicator.markAsProcessed(result.originalUrl, result.title, '', true, result.publishedAt);
+        log.info(`✅ Publicado: "${result.title}" → ${result.blogUrl || result.slug}`);
+      } else {
+        errors++;
+        deduplicator.markAsProcessed(result.originalUrl, result.title, '', false);
+        log.error(`❌ Falha ao publicar: "${result.title}" - ${result.error}`);
       }
     }
 
-    // Show recent stats
+    // Show stats
     const stats = deduplicator.getStats();
     log.info('Estatísticas de deduplicação:', { total: stats.total, published: stats.published, pending: stats.pending });
 
@@ -133,7 +132,7 @@ async function runPipeline(): Promise<RunResult> {
 // Start the scheduled job
 function startScheduler(): void {
   log.info('Inicializando agendador...');
-  log.info(`Agendamento configurado: ${config.cronSchedule} (atualmente: ${config.cronSchedule})`);
+  log.info(`Agendamento configurado: ${config.cronSchedule}`);
 
   const job = new CronJob(
     config.cronSchedule,
@@ -151,16 +150,13 @@ function startScheduler(): void {
     'America/Sao_Paulo'
   );
 
-    log.info(`Agendador iniciado. Próxima execução: ${job.nextDate().toISO()}`);
-
-    // Log next 3 execution times
-    const nextDates = job.nextDates(3);
-    for (let i = 0; i < nextDates.length; i++) {
-      log.info(`  Execução ${i + 1}: ${nextDates[i].toISO()}`);
-    }
+  log.info(`Agendador iniciado. Próxima execução: ${job.nextDate().toISO()}`);
+  const nextDates = job.nextDates(3);
+  for (let i = 0; i < nextDates.length; i++) {
+    log.info(`  Execução ${i + 1}: ${nextDates[i].toISO()}`);
+  }
 }
 
-// Main entry point
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const runOnce = args.includes('--once') || args.includes('--now');
@@ -169,15 +165,13 @@ async function main(): Promise<void> {
   console.log('╔══════════════════════════════════════════╗');
   console.log('║      🤖 AGENTE EDITORIAL v1.0           ║');
   console.log('║  Blog automatizado sobre IA, No-Code,   ║');
-  console.log('║  LLMs, Vibe Coding & mais                ║');
+  console.log('║  LLMs, Vibe Coding & mais               ║');
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
 
-  // Validate config
   if (!config.openaiApiKey) {
-    log.warn('⚠ OPENAI_API_KEY não configurada. Defina no arquivo .env');
-    log.warn('  O sistema precisa da chave da OpenAI para reescrever os artigos.');
-    log.warn('  Copie .env.example para .env e adicione sua chave.');
+    log.warn('⚠ OPENAI_API_KEY não configurada. Defina no .env');
+    log.warn('  Use a chave DeepSeek: sk-c5d1f64990bc498cb701dd4b4ce278dc');
   }
 
   log.info(`Modo: ${runOnce ? 'Execução única' : 'Agendado'}`);
@@ -187,11 +181,12 @@ async function main(): Promise<void> {
   log.info(`Público-alvo: ${config.audienceMode}`);
   log.info(`Máx. artigos por execução: ${config.maxArticlesPerRun}`);
   log.info(`Fontes RSS configuradas: ${config.customFeeds.length}`);
+  log.info(`Database URL configurada: ${process.env.DATABASE_URL ? '✅ Sim' : '❌ Não'}`);
 
   if (runOnce) {
     log.info('▶ Executando pipeline uma vez...');
     const result = await runPipeline();
-  log.info('Resultado final:', result as unknown as Record<string, unknown>);
+    log.info('Resultado final:', result as unknown as Record<string, unknown>);
     process.exit(0);
   } else {
     startScheduler();
@@ -199,20 +194,18 @@ async function main(): Promise<void> {
   }
 }
 
-// Handle graceful shutdown
 process.on('SIGINT', () => {
-  log.info('Recebido SIGINT. Encerrando graciosamente...');
+  log.info('SIGINT recebido. Encerrando...');
   deduplicator.save();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  log.info('Recebido SIGTERM. Encerrando graciosamente...');
+  log.info('SIGTERM recebido. Encerrando...');
   deduplicator.save();
   process.exit(0);
 });
 
-// Unhandled error handling
 process.on('uncaughtException', (error) => {
   log.error('Exceção não capturada', { error: String(error) });
   deduplicator.save();

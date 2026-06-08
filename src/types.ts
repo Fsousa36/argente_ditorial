@@ -59,7 +59,7 @@ export interface PublishedArticle {
 
 export interface AgentConfig {
   openaiApiKey: string;
-  blogType: 'wordpress' | 'json';
+  blogType: 'wordpress' | 'json' | 'database';
   blogUrl: string;
   blogApiKey: string;
   outputDir: string;
